@@ -1,5 +1,8 @@
 # LaneDet
 
+Download the "condlane_r101_culane.pth" in ./model:
+[Model](https://github.com/Turoad/lanedet/tree/main/configs/condlane)
+
 
 To run inference on example image and save the visualization images in `vis` folder:
 ```
@@ -14,7 +17,7 @@ python tools/detect_video.py configs/condlane/resnet101_culane.py --video test_c
 ## Introduction
 LaneDet is an open source lane detection toolbox based on PyTorch that aims to pull together a wide variety of state-of-the-art lane detection models. Developers can reproduce these SOTA methods and build their own methods.
 
-![demo image](.github/_clips_0601_1494452613491980502_20.jpg)
+![demo image](./vis/Campus.png)
 
 ## Table of Contents
 * [Introduction](#Introduction)
