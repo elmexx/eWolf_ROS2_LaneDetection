@@ -1,0 +1,3 @@
+./lanedet_ros2/lanedet_ros2/model/condlane_r101_culane.pth
+**/__pycache__/
+*.pyc
