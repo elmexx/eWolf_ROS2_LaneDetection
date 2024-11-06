@@ -33,6 +33,9 @@ from lanedet.utils.visualization import imshow_lanes
 from lanedet.utils.net_utils import load_network
 from pathlib import Path
 from .tools.lane_parameter import DictObjHolder, bev_perspective, PolynomialRegression, get_fit_param, insertLaneBoundary
+from message_filters import Subscriber, TimeSynchronizer, ApproximateTimeSynchronizer
+import warnings    
+warnings.simplefilter('ignore', np.RankWarning) 
 
 # garmin 1920*1080
 """
@@ -59,7 +62,7 @@ spaceToLeftSide = 5
 spaceToRightSide = 5
 bottomOffset = 1
 
-imgw = 848
+imgw = 640 #848
 imgh = 480
 window_size = 10
 
@@ -125,14 +128,14 @@ class Lanedet(Node):
         super().__init__('lanedet_node')
 
         self.declare_parameter("camera_topic", "/camera/color/image_raw")
+        self.declare_parameter("yolodet_topic", "/detection/yolov5_detection_image")
         # Create a subscriber to the Image topic
         camera_topic = self.get_parameter("camera_topic").get_parameter_value().string_value
-        self.get_logger().info("Subscription from %s" % camera_topic)
-        
+        yolodet_topic = self.get_parameter("yolodet_topic").get_parameter_value().string_value
         ## singel subscription
-        self.subscription = self.create_subscription(SensorImage, camera_topic, self.listener_callback, 10)
-        # self.subscription_camerapose = self.create_subscription(Imu, "/imu/data", self.pose_callback, 10)
-        self.subscription  # prevent unused variable warning
+        # self.subscription = self.create_subscription(SensorImage, camera_topic, self.listener_callback, 10)
+        # #self.subscription_camerapose = self.create_subscription(Imu, "/imu/data", self.pose_callback, 10)
+        # self.subscription  # prevent unused variable warning
         # self.subscription_camerapose
         ### test multi topic subscriber
         # camera_img = Subscriber(self, SensorImage, camera_topic)
@@ -140,6 +143,40 @@ class Lanedet(Node):
         # ts = TimeSynchronizer([camera_img, camera_pose], 10)
         # ts.registerCallback(self.listener_callback)
 
+        camera_sub = Subscriber(self, SensorImage, camera_topic)
+        self.get_logger().info("Subscription from %s" % camera_topic)
+        
+        # self.get_logger().info("Subscription from %s" % yolodet_topic)
+
+        # time.sleep(0.5)
+        self.yolo_is_available = False
+        topics = self.get_topic_names_and_types()
+        print(topics)
+        for topic_name, topic_type in topics:
+            if topic_name == yolodet_topic:
+                self.yolo_is_available = True
+                self.get_logger().info("Subscription from %s" % yolodet_topic)
+                yolo_sub = Subscriber(self, SensorImage, yolodet_topic)
+        if self.yolo_is_available == False:
+            time.sleep(1)
+            topics = self.get_topic_names_and_types()
+            print(topics)
+            for topic_name, topic_type in topics:
+                if topic_name == yolodet_topic:
+                    self.yolo_is_available = True
+                    self.get_logger().info("Subscription from %s" % yolodet_topic)
+                    yolo_sub = Subscriber(self, SensorImage, yolodet_topic)
+
+        if self.yolo_is_available:
+            # ts = TimeSynchronizer([camera_sub, yolo_sub], 10)
+            ts = ApproximateTimeSynchronizer([camera_sub, yolo_sub], 10, 0.5)
+            ts.registerCallback(self.sync_callback)
+        else:
+            self.subscription = self.create_subscription(SensorImage, camera_topic, self.listener_callback, 10)
+            #self.subscription_camerapose = self.create_subscription(Imu, "/imu/data", self.pose_callback, 10)
+            self.subscription  # prevent unused variable warning
+            self.get_logger().info("NO YOLO Detection Image from %s" % yolodet_topic)
+ 
         self.bridge = CvBridge()
 
         # Create a Lane detection topic to publish results on
@@ -198,18 +235,22 @@ class Lanedet(Node):
         except (RuntimeError, TypeError, NameError):
             self.get_logger().info("no camera pose!!! ")
 
-    def listener_callback(self, camera_img):
+    def listener_callback(self, camera_msg):
         # self.get_logger().info("Received an image! ")
         try:
-          cv_image = self.bridge.imgmsg_to_cv2(camera_img, "bgr8")
+            cv_image = self.bridge.imgmsg_to_cv2(camera_msg, "bgr8")
+          # yolo_img = self.bridge.imgmsg_to_cv2(yolo_sub, "bgr8")
         except CvBridgeError as e:
-          cv_image = np.zeros((480,848)).astype(np.uint8)
-          print(e)
+            cv_image = np.zeros((480,848)).astype(np.uint8)
+            # yolo_img = np.zeros((480,848)).astype(np.uint8)
+            print(e)
+
         # self.get_logger().info('pitch, yaw, roll: "%f, %f, %f"' % (self.CameraPose.Pitch, self.CameraPose.Yaw, self.CameraPose.Roll))
         outdata = self.detect.run(cv_image)
         lanes = [lane.to_array(self.detect.cfg) for lane in outdata['lanes']]
         img = outdata['ori_img'].copy()
         img = cv2.resize(img, (int(self.detect.x_scale * img.shape[1]), int(self.detect.y_scale * img.shape[0])))
+        
         binaryimg_original = np.zeros((img.shape[0], img.shape[1])).astype(np.uint8)
         color_idx = 0
         lane_num = len(lanes)
@@ -226,7 +267,7 @@ class Lanedet(Node):
                 x = np.round(x * self.detect.x_scale)
                 y = np.round(y * self.detect.y_scale)
                 x, y = int(x), int(y)
-                cv2.circle(binaryimg_original, (x, y), 3, 255, -1)
+                # cv2.circle(binaryimg_original, (x, y), 3, 255, -1)
                 cv2.circle(img, (x, y), 3, (0,255,0), -1)
                 lanes_list[lane_idx].append(np.array([x,y]))
             color_idx = color_idx + 1
@@ -263,10 +304,10 @@ class Lanedet(Node):
 
         if egoleft.size==0 and egoright.size!=0:
             egoleft = egoright.copy()
-            egoleft[:,1] = egoleft[:,1]+3.5
+            egoleft[:,1] = egoleft[:,1]+4 #3.5
         if egoleft.size!=0 and egoright.size==0:
             egoright = egoleft.copy()
-            egoright[:,1] = egoright[:,1]-3.5
+            egoright[:,1] = egoright[:,1]-4 #3.5
 
         left_init_param = np.array([])
         right_init_param = np.array([])
@@ -286,7 +327,9 @@ class Lanedet(Node):
         left_lane_img = insertLaneBoundary(img, warpimage, leftparam, self.OutImageView, birdseyeview, (0,0,255))
         right_lane_img = insertLaneBoundary(left_lane_img, warpimage, rightparam, self.OutImageView, birdseyeview, (255,0,0))
         lane_img = insertLaneBoundary(right_lane_img, warpimage, m_laneparam, self.OutImageView, birdseyeview, (0,255,255))
-        lane_img = cv2.line(lane_img, (480,460),(480,480),(0,255,0),3)
+
+        lane_img = cv2.line(lane_img, (445,460),(445,480),(0,255,0),3)
+        
         # imageX, imageY = np.where(warpimage)
         # xyBoundaryPoints = birdseyeview.bevimagetovehicle(np.column_stack((imageY,imageX)))
 
@@ -300,8 +343,8 @@ class Lanedet(Node):
 
         # left_lane_img = insertLaneBoundary(img, warpimage, leftparam, self.OutImageView, birdseyeview)
         # lane_img = insertLaneBoundary(left_lane_img, warpimage, rightparam, self.OutImageView, birdseyeview)
-        
-        cv2.imshow('view', lane_img)
+        vis_img = cv2.resize(img, (1280,960))
+        cv2.imshow('Lane_Detection', vis_img)
         # cv2.imshow('bev', warpimage)
         cv2.waitKey(1)
         # leftparam = np.array([])
@@ -363,10 +406,191 @@ class Lanedet(Node):
         self.rightdetection_publisher.publish(right_detection)
         self.pub_projected_markings.publish(combined_lanes)
 
-        ros_image = self.bridge.cv2_to_imgmsg(img)
+        ros_image = self.bridge.cv2_to_imgmsg(img, "bgr8")
         ros_image.header.frame_id = 'lane_detectimg'
         self.result_publisher.publish(ros_image)
         
+    def sync_callback(self, camera_sub, yolo_sub):
+        # self.get_logger().info("Received an image! ")
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(camera_sub, "bgr8")
+          # yolo_img = self.bridge.imgmsg_to_cv2(yolo_sub, "bgr8")
+        except CvBridgeError as e:
+            cv_image = np.zeros((480,848)).astype(np.uint8)
+            # yolo_img = np.zeros((480,848)).astype(np.uint8)
+            print(e)
         
-        
+        try:
+            # cv_image = self.bridge.imgmsg_to_cv2(camera_sub, "bgr8")
+            yolo_img = self.bridge.imgmsg_to_cv2(yolo_sub, "bgr8")
+        except CvBridgeError as e:
+            # cv_image = np.zeros((480,848)).astype(np.uint8)
+            yolo_img = cv_image
+            print('NO YOLO Detection Image')
 
+        # self.get_logger().info('pitch, yaw, roll: "%f, %f, %f"' % (self.CameraPose.Pitch, self.CameraPose.Yaw, self.CameraPose.Roll))
+        outdata = self.detect.run(cv_image)
+        lanes = [lane.to_array(self.detect.cfg) for lane in outdata['lanes']]
+        ori_img = outdata['ori_img'].copy()
+        img = yolo_img.copy()
+        # img = cv2.resize(img, (int(ori_img.shape[1]), int(ori_img.shape[0])))
+        img = cv2.resize(img, (int(self.detect.x_scale * ori_img.shape[1]), int(self.detect.y_scale * ori_img.shape[0])))
+
+        binaryimg_original = np.zeros((img.shape[0], img.shape[1])).astype(np.uint8)
+        color_idx = 0
+        lane_num = len(lanes)
+        warpimage, unwarp_matrix, birdseyeview = bev_perspective(img, mtx, self.CameraPose, self.OutImageView, self.OutImageSize)
+        lanes_list = [[] for _ in range(lane_num)]
+        lanes_wc = [[] for _ in range(lane_num)]
+        lane_idx = 0
+
+        for lane in lanes:
+            lane_color = COLOR_MAP[color_idx]
+            for x, y in lane:
+                if x <= 0 or y <= 0:
+                    continue
+                x = np.round(x * self.detect.x_scale)
+                y = np.round(y * self.detect.y_scale)
+                x, y = int(x), int(y)
+                # cv2.circle(binaryimg_original, (x, y), 3, 255, -1)
+                cv2.circle(img, (x, y), 3, (0,255,0), -1)
+                lanes_list[lane_idx].append(np.array([x,y]))
+            color_idx = color_idx + 1
+            lanes_wc[lane_idx], _ = birdseyeview.imagetovehicle(np.asarray(lanes_list[lane_idx]))
+            lane_idx = lane_idx + 1
+        # get left and right lanes
+        left_lanes = []
+        right_lanes = []
+        egoleft = np.array([])
+        egoright = np.array([])
+        if lanes_wc:    #   !!if lanes_wc = [[],[]], there will give an error!
+            for lane in lanes_wc:
+                lateraloffset = lane[0][1]
+                if lateraloffset>=0:
+                    left_lanes.append(lane)
+                else:
+                    right_lanes.append(lane)
+        if left_lanes:
+            left_lateraloffset = []
+            for lane in left_lanes: 
+                left_lateraloffset.append(lane[0][1])
+            idxmin = np.argmin(left_lateraloffset)
+            egoleft = left_lanes[idxmin]
+            if egoleft[0][1] > 3:
+                egoleft = np.array([])
+        if right_lanes:
+            right_lateraloffset = []
+            for lane in right_lanes: 
+                right_lateraloffset.append(lane[0][1])
+            idxmax = np.argmax(right_lateraloffset)
+            egoright = right_lanes[idxmax]
+            if egoright[0][1] < -3:
+                egoright = np.array([])
+
+        if egoleft.size==0 and egoright.size!=0:
+            egoleft = egoright.copy()
+            egoleft[:,1] = egoleft[:,1]+4 #3.5
+        if egoleft.size!=0 and egoright.size==0:
+            egoright = egoleft.copy()
+            egoright[:,1] = egoright[:,1]-4 #3.5
+
+        left_init_param = np.array([])
+        right_init_param = np.array([])
+        m_laneparam = np.array([])
+        leftparam = get_fit_param(egoleft, left_init_param, self.left_fit_model)
+        rightparam = get_fit_param(egoright, right_init_param, self.right_fit_model)
+
+        if leftparam.size > 0:
+            leftparam = moving_average(leftparam, self.left_window_data)
+            self.left_window_data = np.vstack((self.left_window_data[1:], leftparam))
+        if rightparam.size > 0:
+            rightparam = moving_average(rightparam, self.right_window_data)
+            self.right_window_data = np.vstack((self.right_window_data[1:], rightparam))
+        
+        m_laneparam = (leftparam + rightparam)/2
+
+        left_lane_img = insertLaneBoundary(img, warpimage, leftparam, self.OutImageView, birdseyeview, (0,0,255))
+        right_lane_img = insertLaneBoundary(left_lane_img, warpimage, rightparam, self.OutImageView, birdseyeview, (255,0,0))
+        lane_img = insertLaneBoundary(right_lane_img, warpimage, m_laneparam, self.OutImageView, birdseyeview, (0,255,255))
+        
+        lane_img = cv2.line(lane_img, (445,460),(445,480),(0,255,0),3)
+        # imageX, imageY = np.where(warpimage)
+        # xyBoundaryPoints = birdseyeview.bevimagetovehicle(np.column_stack((imageY,imageX)))
+
+        # leftlane = xyBoundaryPoints[xyBoundaryPoints[:,1]>0]
+        # rightlane = xyBoundaryPoints[xyBoundaryPoints[:,1]<=0]
+
+        # left_init_param = np.array([])
+        # right_init_param = np.array([])
+        # leftparam = get_fit_param(leftlane, left_init_param, self.left_fit_model)
+        # rightparam = get_fit_param(rightlane, right_init_param, self.right_fit_model)
+
+        # left_lane_img = insertLaneBoundary(img, warpimage, leftparam, self.OutImageView, birdseyeview)
+        # lane_img = insertLaneBoundary(left_lane_img, warpimage, rightparam, self.OutImageView, birdseyeview)
+        vis_img = cv2.resize(img, (1280,960))
+        cv2.imshow('Lane_Detection', vis_img)
+        # cv2.imshow('bev', warpimage)
+        cv2.waitKey(1)
+        # leftparam = np.array([])
+        # rightparam = np.array([])
+        left_detection = LaneParams()
+        right_detection = LaneParams()
+        combined_lanes = LaneMarkingProjectedArrayBoth()
+        # lmp = LaneMarkingProjected()
+        
+        msg_stamp = self.get_clock().now().to_msg()
+        
+        combined_lanes.header.stamp = msg_stamp
+        combined_lanes.header.frame_id =='base_link'
+
+        left_detection.header.stamp = msg_stamp
+        left_detection.header.frame_id =='base_link'
+        if leftparam.size == 0:
+            left_detection.a = 0.0
+            left_detection.b = 0.0
+            left_detection.c = 0.0
+            # lmp.x = 0.0
+            # lmp.y = 0.0
+            # lmp.z = 0.0
+            # combined_lanes.markings_left.append(lmp)
+        else:
+            left_detection.a = leftparam[0]
+            left_detection.b = leftparam[1]
+            left_detection.c = leftparam[2]
+            for lane in egoleft:
+                lmp = LaneMarkingProjected()
+                lmp.x = lane[0]
+                lmp.y = lane[1]
+                lmp.z = 0.0
+                combined_lanes.markings_left.append(lmp)
+        
+        right_detection.header.stamp = msg_stamp
+        right_detection.header.frame_id =='base_link'
+        if rightparam.size == 0:
+            right_detection.a = 0.0
+            right_detection.b = 0.0
+            right_detection.c = 0.0
+            # lmp.x = 0.0
+            # lmp.y = 0.0
+            # lmp.z = 0.0
+            # combined_lanes.markings_right.append(lmp)
+        else:
+            right_detection.a = rightparam[0]
+            right_detection.b = rightparam[1]
+            right_detection.c = rightparam[2]
+            for lane in egoright:
+                lmp = LaneMarkingProjected()
+                lmp.x = lane[0]
+                lmp.y = lane[1]
+                lmp.z = 0.0
+                combined_lanes.markings_right.append(lmp)
+        
+        # Publishing the results onto the the lane detection vision_msgs format
+        self.leftdetection_publisher.publish(left_detection)
+        self.rightdetection_publisher.publish(right_detection)
+        self.pub_projected_markings.publish(combined_lanes)
+
+        ros_image = self.bridge.cv2_to_imgmsg(img, "bgr8")
+        ros_image.header.frame_id = 'lane_detectimg'
+        self.result_publisher.publish(ros_image)
+        
